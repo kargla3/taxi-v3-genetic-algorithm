@@ -2,7 +2,8 @@ import numpy as np
 import gymnasium as gym
 import json
 import os
-from typing import List, Dict, Tuple
+import time
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -10,27 +11,19 @@ from datetime import datetime
 class Individual:
     """Klasa reprezentująca osobnika w populacji"""
     id: int
-    genotype: List[float]
+    genotype: List[int]  # Bezpośrednia polityka: akcja dla każdego stanu
     fitness: float = 0.0
-    q_table: np.ndarray = None
+    raw_reward: float = 0.0
+    success_rate: float = 0.0
+    avg_steps: float = 0.0
 
 class TaxiGeneticAlgorithm:
-    """Algorytm genetyczny dla środowiska Taxi-v3"""
+    """Ulepszona wersja algorytmu genetycznego dla Taxi-v3"""
     
-    def __init__(self, population_size: int = 50, num_generations: int = 100, 
-                 mutation_rate: float = 0.1, crossover_rate: float = 0.8,
-                 elite_size: int = 5, seed: int = 42):
-        """
-        Inicjalizacja algorytmu genetycznego
-        
-        Args:
-            population_size: Rozmiar populacji
-            num_generations: Liczba generacji
-            mutation_rate: Prawdopodobieństwo mutacji
-            crossover_rate: Prawdopodobieństwo krzyżowania
-            elite_size: Liczba najlepszych osobników przechodzących do następnej generacji
-            seed: Ziarno dla generatora liczb losowych
-        """
+    def __init__(self, population_size: int = 100, num_generations: int = 50, 
+                 mutation_rate: float = 0.15, crossover_rate: float = 0.85,
+                 elite_size: int = 10, seed: int = 42):
+        """Inicjalizacja algorytmu genetycznego"""
         self.population_size = population_size
         self.num_generations = num_generations
         self.mutation_rate = mutation_rate
@@ -38,297 +31,624 @@ class TaxiGeneticAlgorithm:
         self.elite_size = elite_size
         self.seed = seed
         
-        # Inicjalizacja generatora liczb losowych - TYLKO RAZ!
+        # Inicjalizacja generatora liczb losowych
         self.rng = np.random.default_rng(seed=seed)
         
         # Parametry środowiska
         self.env = gym.make('Taxi-v3')
-        self.state_space = self.env.observation_space.n
-        self.action_space = self.env.action_space.n
+        self.state_space = self.env.observation_space.n  # 500 stanów
+        self.action_space = self.env.action_space.n      # 6 akcji
         
-        # Rozmiar genotypu: [learning_rate, discount_factor, epsilon_start, epsilon_end, epsilon_decay]
-        self.genotype_size = 5
+        # Rozmiar genotypu = liczba stanów
+        self.genotype_size = self.state_space
         
-        # Ograniczenia dla genów
-        self.gene_bounds = [
-            (0.01, 0.5),   # learning_rate
-            (0.8, 0.99),   # discount_factor
-            (0.5, 1.0),    # epsilon_start
-            (0.01, 0.1),   # epsilon_end
-            (0.995, 0.9999) # epsilon_decay
+        # Lokalizacje w Taxi-v3: R(0,0), G(0,4), Y(4,0), B(4,3)
+        self.locations = {
+            0: (0, 0),  # Red
+            1: (0, 4),  # Green  
+            2: (4, 0),  # Yellow
+            3: (4, 3)   # Blue
+        }
+        
+        # Mapa środowiska Taxi-v3 (ściany)
+        self.taxi_map = [
+            "+---------+",
+            "|R: | : :G|",
+            "| : | : : |",
+            "| : : : : |",
+            "| | : | : |",
+            "|Y: | :B: |",
+            "+---------+"
         ]
         
         self.population = []
         self.generation = 0
-        self.progress_file = f"taxi_ga_progress_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        self.best_fitness_history = []
+        self.avg_fitness_history = []
         
-    def create_individual(self, individual_id: int) -> Individual:
-        """Tworzy nowego osobnika z losowym genotypem"""
+        # Analiza dostępnych ruchów dla każdej pozycji
+        self.valid_moves = self._compute_valid_moves()
+        
+    def _compute_valid_moves(self) -> Dict[Tuple[int, int], List[int]]:
+        """Oblicza dostępne ruchy dla każdej pozycji na mapie"""
+        valid_moves = {}
+        
+        for row in range(5):
+            for col in range(5):
+                moves = []
+                
+                # Sprawdź każdy kierunek
+                # Południe (0)
+                if row < 4:
+                    moves.append(0)
+                
+                # Północ (1) 
+                if row > 0:
+                    moves.append(1)
+                
+                # Wschód (2)
+                if col < 4:
+                    # Sprawdź czy nie ma pionowej ściany
+                    if not ((row == 0 and col == 1) or 
+                           (row == 1 and col == 1) or
+                           (row == 3 and col == 2) or
+                           (row == 4 and col == 2)):
+                        moves.append(2)
+                
+                # Zachód (3)
+                if col > 0:
+                    # Sprawdź czy nie ma pionowej ściany
+                    if not ((row == 0 and col == 2) or 
+                           (row == 1 and col == 2) or
+                           (row == 3 and col == 3) or
+                           (row == 4 and col == 3)):
+                        moves.append(3)
+                
+                valid_moves[(row, col)] = moves
+        
+        return valid_moves
+    
+    def manhattan_distance(self, pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
+        """Oblicza odległość Manhattan między dwoma pozycjami"""
+        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+    
+    def get_best_move(self, taxi_pos: Tuple[int, int], target_pos: Tuple[int, int]) -> int:
+        """Zwraca najlepszy dostępny ruch w kierunku celu"""
+        taxi_row, taxi_col = taxi_pos
+        target_row, target_col = target_pos
+        
+        # Pobierz dostępne ruchy dla aktualnej pozycji
+        available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+        
+        if not available_moves:
+            return self.rng.choice([0, 1, 2, 3])
+        
+        # Preferowane kierunki do celu
+        preferred_moves = []
+        
+        if taxi_row < target_row and 0 in available_moves:  # Południe
+            preferred_moves.append(0)
+        if taxi_row > target_row and 1 in available_moves:  # Północ
+            preferred_moves.append(1)
+        if taxi_col < target_col and 2 in available_moves:  # Wschód
+            preferred_moves.append(2)
+        if taxi_col > target_col and 3 in available_moves:  # Zachód
+            preferred_moves.append(3)
+        
+        if preferred_moves:
+            return self.rng.choice(preferred_moves)
+        else:
+            return self.rng.choice(available_moves)
+    
+    def create_heuristic_individual(self, individual_id: int, intelligence_level: float = 0.9) -> Individual:
+        """Tworzy osobnika z heurystyką opartą na logice"""
         genotype = []
-        for i in range(self.genotype_size):
-            min_val, max_val = self.gene_bounds[i]
-            gene = self.rng.uniform(min_val, max_val)
-            genotype.append(gene)
+        
+        for state in range(self.genotype_size):
+            taxi_row, taxi_col, passenger_loc, destination = self.env.unwrapped.decode(state)
+            taxi_pos = (taxi_row, taxi_col)
+            
+            # Heurystyka w zależności od sytuacji
+            if passenger_loc < 4:  # Pasażer czeka na stacji
+                passenger_pos = self.locations[passenger_loc]
+                
+                if taxi_pos == passenger_pos:  # Jesteśmy przy pasażerze
+                    if self.rng.random() < intelligence_level:
+                        action = 4  # Podnieś pasażera
+                    else:
+                        action = self.rng.integers(0, self.action_space)
+                else:  # Idź po pasażera
+                    if self.rng.random() < intelligence_level:
+                        action = self.get_best_move(taxi_pos, passenger_pos)
+                    else:
+                        available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                        action = self.rng.choice(available_moves)
+                        
+            elif passenger_loc == 4:  # Pasażer w taksówce
+                destination_pos = self.locations[destination]
+                
+                if taxi_pos == destination_pos:  # Jesteśmy w celu
+                    if self.rng.random() < intelligence_level:
+                        action = 5  # Zostaw pasażera
+                    else:
+                        action = self.rng.integers(0, self.action_space)
+                else:  # Idź do celu z pasażerem
+                    if self.rng.random() < intelligence_level:
+                        action = self.get_best_move(taxi_pos, destination_pos)
+                    else:
+                        available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                        action = self.rng.choice(available_moves)
+            else:
+                # Nieprawidłowy stan - losowa akcja ruchu
+                available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                action = self.rng.choice(available_moves)
+            
+            genotype.append(action)
+        
+        return Individual(id=individual_id, genotype=genotype)
+    
+    def create_random_individual(self, individual_id: int) -> Individual:
+        """Tworzy losowego osobnika z preferencją dla ruchów"""
+        genotype = []
+        for state in range(self.genotype_size):
+            taxi_row, taxi_col, _, _ = self.env.unwrapped.decode(state)
+            taxi_pos = (taxi_row, taxi_col)
+            
+            # 70% szans na ruch, 15% na pickup, 15% na dropoff
+            if self.rng.random() < 0.7:
+                available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                action = self.rng.choice(available_moves)
+            else:
+                action = self.rng.choice([4, 5])  # pickup lub dropoff
+            
+            genotype.append(action)
         
         return Individual(id=individual_id, genotype=genotype)
     
     def initialize_population(self):
-        """Inicjalizuje populację"""
+        """Inicjalizuje populację z różnymi strategiami"""
         self.population = []
-        for i in range(self.population_size):
-            individual = self.create_individual(i)
+        
+        # 55% bardzo inteligentnych (0.85-0.95)
+        very_smart_count = int(0.55 * self.population_size)
+        for i in range(very_smart_count):
+            intelligence = 0.85 + self.rng.random() * 0.1
+            individual = self.create_heuristic_individual(i, intelligence)
             self.population.append(individual)
+        
+        # 30% średnio inteligentnych (0.65-0.85)  
+        smart_count = int(0.3 * self.population_size)
+        for i in range(very_smart_count, very_smart_count + smart_count):
+            intelligence = 0.65 + self.rng.random() * 0.2
+            individual = self.create_heuristic_individual(i, intelligence)
+            self.population.append(individual)
+        
+        # 10% słabo inteligentnych (0.4-0.65)
+        weak_smart_count = int(0.10 * self.population_size)
+        for i in range(very_smart_count + smart_count, very_smart_count + smart_count + weak_smart_count):
+            intelligence = 0.4 + self.rng.random() * 0.25
+            individual = self.create_heuristic_individual(i, intelligence)
+            self.population.append(individual)
+        
+        # 5% całkowicie losowych
+        for i in range(very_smart_count + smart_count + weak_smart_count, self.population_size):
+            individual = self.create_random_individual(i)
+            self.population.append(individual)
+            
+        print(f"Zainicjalizowano populację {self.population_size} osobników:")
+        print(f"- Bardzo inteligentnych (85-95%): {very_smart_count}")
+        print(f"- Średnio inteligentnych (65-85%): {smart_count}")
+        print(f"- Słabo inteligentnych (40-65%): {weak_smart_count}")
+        print(f"- Losowych: {self.population_size - very_smart_count - smart_count - weak_smart_count}")
     
-    def train_q_learning(self, individual: Individual, episodes: int = 1000) -> Tuple[np.ndarray, float]:
-        """
-        Trenuje Q-learning z parametrami z genotypu osobnika
-        
-        Returns:
-            Tuple[Q-table, średnia nagroda]
-        """
-        learning_rate, discount_factor, epsilon_start, epsilon_end, epsilon_decay = individual.genotype
-        
-        # Inicjalizacja Q-table
-        q_table = self.rng.uniform(-1, 1, (self.state_space, self.action_space))
-        
-        epsilon = epsilon_start
+    def evaluate_individual(self, individual: Individual, episodes: int = 20) -> float:
+        """Ulepszona ocena osobnika z wieloma metrykami"""
         total_rewards = []
+        successful_episodes = 0
+        total_steps = []
+        pickup_successes = 0
+        dropoff_successes = 0
+        illegal_actions = 0
         
         for episode in range(episodes):
             state, _ = self.env.reset()
             episode_reward = 0
             done = False
+            max_steps = 200
+            step = 0
+            episode_pickups = 0
+            episode_dropoffs = 0
+            episode_illegal = 0
             
-            while not done:
-                # Epsilon-greedy action selection
-                if self.rng.random() < epsilon:
-                    action = self.rng.integers(0, self.action_space)
-                else:
-                    action = np.argmax(q_table[state])
-                
+            while not done and step < max_steps:
+                action = individual.genotype[state]
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
                 done = terminated or truncated
                 
-                # Q-learning update
-                best_next_action = np.argmax(q_table[next_state])
-                td_target = reward + discount_factor * q_table[next_state][best_next_action]
-                td_error = td_target - q_table[state][action]
-                q_table[state][action] += learning_rate * td_error
+                episode_reward += reward
+                
+                # Analiza akcji
+                if reward == 20:  # Sukces - dotarcie do celu
+                    episode_dropoffs += 1
+                elif reward == -10:  # Illegalna akcja
+                    episode_illegal += 1
+                elif reward == -1:  # Normalna akcja
+                    if action == 4:  # Próba pickup
+                        taxi_row, taxi_col, passenger_loc, _ = self.env.unwrapped.decode(state)
+                        if passenger_loc < 4:
+                            passenger_pos = self.locations[passenger_loc]
+                            if (taxi_row, taxi_col) == passenger_pos:
+                                episode_pickups += 1
                 
                 state = next_state
-                episode_reward += reward
+                step += 1
             
             total_rewards.append(episode_reward)
-            if epsilon > epsilon_end:
-                epsilon *= epsilon_decay
-        
-        avg_reward = np.mean(total_rewards[-100:])  # Średnia z ostatnich 100 epizodów
-        return q_table, avg_reward
-    
-    def evaluate_individual(self, individual: Individual) -> float:
-        """Ocenia osobnika przez trening Q-learning"""
-        q_table, avg_reward = self.train_q_learning(individual)
-        individual.q_table = q_table
-        
-        # Dodatkowo testujemy wytrenowany model
-        test_rewards = []
-        for _ in range(100):  # 100 testowych epizodów
-            state, _ = self.env.reset()
-            episode_reward = 0
-            done = False
+            total_steps.append(step)
+            pickup_successes += episode_pickups
+            dropoff_successes += episode_dropoffs
+            illegal_actions += episode_illegal
             
-            while not done:
-                action = np.argmax(q_table[state])
-                state, reward, terminated, truncated, _ = self.env.step(action)
-                done = terminated or truncated
-                episode_reward += reward
-            
-            test_rewards.append(episode_reward)
+            if episode_reward > 0:
+                successful_episodes += 1
         
-        # Fitness jako średnia nagroda z testowania
-        fitness = np.mean(test_rewards)
-        return fitness
+        # Metryki
+        avg_reward = np.mean(total_rewards)
+        success_rate = successful_episodes / episodes
+        avg_steps = np.mean(total_steps)
+        pickup_rate = pickup_successes / episodes
+        dropoff_rate = dropoff_successes / episodes
+        illegal_rate = illegal_actions / episodes
+        
+        # Zapisz dodatkowe metryki
+        individual.raw_reward = avg_reward
+        individual.success_rate = success_rate
+        individual.avg_steps = avg_steps
+        
+        # Ulepszona funkcja fitness
+        fitness = avg_reward  # Bazowa nagroda
+        
+        # Duży bonus za sukces
+        fitness += success_rate * 300
+        
+        # Bonus za prawidłowe akcje
+        fitness += pickup_rate * 50
+        fitness += dropoff_rate * 100
+        
+        # Kara za nielegalne akcje
+        fitness -= illegal_rate * 100
+        
+        # Bonus za efektywność (mniej kroków gdy sukces)
+        if success_rate > 0:
+            efficiency_bonus = max(0, (150 - avg_steps) * 0.2)
+            fitness += efficiency_bonus
+        
+        # Dodatkowy bonus za wysoką skuteczność
+        if success_rate >= 0.8:
+            fitness += 150
+        elif success_rate >= 0.5:
+            fitness += 75
+        elif success_rate >= 0.2:
+            fitness += 30
+        
+        return max(fitness, avg_reward)  # Fitness nie może być gorszy niż średnia nagroda
     
     def evaluate_population(self):
         """Ocenia całą populację"""
-        print(f"Ocenianie populacji generacji {self.generation}...")
+        print(f"\nOcenianie populacji generacji {self.generation}...")
         for i, individual in enumerate(self.population):
             individual.fitness = self.evaluate_individual(individual)
-            print(f"Osobnik {individual.id}: fitness = {individual.fitness:.2f}")
+            if (i + 1) % 20 == 0:
+                print(f"Oceniono {i + 1}/{len(self.population)} osobników")
+        
+        # Sortuj populację według fitness
+        self.population.sort(key=lambda x: x.fitness, reverse=True)
+        
+        # Zapisz historię
+        best_fitness = self.population[0].fitness
+        avg_fitness = np.mean([ind.fitness for ind in self.population])
+        self.best_fitness_history.append(best_fitness)
+        self.avg_fitness_history.append(avg_fitness)
+        
+        print(f"Najlepszy fitness: {best_fitness:.2f}")
+        print(f"Średni fitness: {avg_fitness:.2f}")
     
-    def tournament_selection(self, tournament_size: int = 3) -> Individual:
+    def tournament_selection(self, tournament_size: int = 7) -> Individual:
         """Selekcja turniejowa"""
-        tournament = self.rng.choice(self.population, tournament_size, replace=False)
+        tournament_size = min(tournament_size, len(self.population))
+        tournament_indices = self.rng.choice(len(self.population), tournament_size, replace=False)
+        tournament = [self.population[i] for i in tournament_indices]
         return max(tournament, key=lambda x: x.fitness)
     
-    def crossover(self, parent1: Individual, parent2: Individual) -> Tuple[Individual, Individual]:
-        """Krzyżowanie jednopunktowe"""
+    def uniform_crossover(self, parent1: Individual, parent2: Individual) -> Tuple[Individual, Individual]:
+        """Krzyżowanie jednostajne z kontekstem"""
         if self.rng.random() > self.crossover_rate:
-            return parent1, parent2
+            child1 = Individual(id=-1, genotype=parent1.genotype.copy())
+            child2 = Individual(id=-1, genotype=parent2.genotype.copy())
+            return child1, child2
         
-        crossover_point = self.rng.integers(1, self.genotype_size)
+        child1_genotype = []
+        child2_genotype = []
         
-        child1_genotype = (parent1.genotype[:crossover_point] + 
-                          parent2.genotype[crossover_point:])
-        child2_genotype = (parent2.genotype[:crossover_point] + 
-                          parent1.genotype[crossover_point:])
+        for i in range(len(parent1.genotype)):
+            if self.rng.random() < 0.5:
+                child1_genotype.append(parent1.genotype[i])
+                child2_genotype.append(parent2.genotype[i])
+            else:
+                child1_genotype.append(parent2.genotype[i])
+                child2_genotype.append(parent1.genotype[i])
         
         child1 = Individual(id=-1, genotype=child1_genotype)
         child2 = Individual(id=-1, genotype=child2_genotype)
         
         return child1, child2
     
-    def mutate(self, individual: Individual):
-        """Mutacja gaussowska"""
-        for i in range(len(individual.genotype)):
-            if self.rng.random() < self.mutation_rate:
-                min_val, max_val = self.gene_bounds[i]
-                # Gaussowska mutacja z ograniczeniem do granic
-                mutation = self.rng.normal(0, 0.1)
-                individual.genotype[i] += mutation
-                # Ograniczenie do dozwolonych wartości
-                individual.genotype[i] = np.clip(individual.genotype[i], min_val, max_val)
+    def smart_mutate(self, individual: Individual):
+        """Inteligentna mutacja z kontekstem"""
+        # Adaptacyjna stopa mutacji - maleje z czasem
+        adaptive_rate = self.mutation_rate * (1.0 - 0.5 * self.generation / self.num_generations)
+        
+        for state in range(len(individual.genotype)):
+            if self.rng.random() < adaptive_rate:
+                taxi_row, taxi_col, passenger_loc, destination = self.env.unwrapped.decode(state)
+                taxi_pos = (taxi_row, taxi_col)
+                
+                # Kontekstowa mutacja
+                if passenger_loc < 4:  # Pasażer czeka
+                    passenger_pos = self.locations[passenger_loc]
+                    if taxi_pos == passenger_pos:
+                        # Przy pasażerze - preferuj pickup
+                        new_action = self.rng.choice([4, 0, 1, 2, 3], p=[0.7, 0.075, 0.075, 0.075, 0.075])
+                    else:
+                        # Nie przy pasażerze - preferuj sensowny ruch
+                        available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                        best_move = self.get_best_move(taxi_pos, passenger_pos)
+                        if best_move in available_moves:
+                            # 60% szans na najlepszy ruch, 40% na losowy z dostępnych
+                            if self.rng.random() < 0.6:
+                                new_action = best_move
+                            else:
+                                new_action = self.rng.choice(available_moves)
+                        else:
+                            new_action = self.rng.choice(available_moves)
+                            
+                elif passenger_loc == 4:  # Pasażer w taksówce
+                    destination_pos = self.locations[destination]
+                    if taxi_pos == destination_pos:
+                        # W celu - preferuj dropoff
+                        new_action = self.rng.choice([5, 0, 1, 2, 3], p=[0.7, 0.075, 0.075, 0.075, 0.075])
+                    else:
+                        # Nie w celu - preferuj sensowny ruch
+                        available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                        best_move = self.get_best_move(taxi_pos, destination_pos)
+                        if best_move in available_moves:
+                            if self.rng.random() < 0.6:
+                                new_action = best_move
+                            else:
+                                new_action = self.rng.choice(available_moves)
+                        else:
+                            new_action = self.rng.choice(available_moves)
+                else:
+                    # Fallback
+                    available_moves = self.valid_moves.get(taxi_pos, [0, 1, 2, 3])
+                    new_action = self.rng.choice(available_moves)
+                
+                individual.genotype[state] = new_action
     
     def create_next_generation(self):
         """Tworzy następną generację"""
-        # Sortowanie populacji według fitness (malejąco)
-        self.population.sort(key=lambda x: x.fitness, reverse=True)
+        print(f"Tworzenie następnej generacji...")
+        
+        next_generation = []
         
         # Elityzm - najlepsi przechodzą bez zmian
-        next_generation = self.population[:self.elite_size]
+        for i in range(self.elite_size):
+            elite = Individual(id=i, genotype=self.population[i].genotype.copy())
+            elite.fitness = self.population[i].fitness
+            elite.raw_reward = self.population[i].raw_reward
+            elite.success_rate = self.population[i].success_rate
+            elite.avg_steps = self.population[i].avg_steps
+            next_generation.append(elite)
         
-        # Tworzenie reszty populacji
+        # Reszta przez reprodukcję
         while len(next_generation) < self.population_size:
             parent1 = self.tournament_selection()
             parent2 = self.tournament_selection()
             
-            child1, child2 = self.crossover(parent1, parent2)
+            child1, child2 = self.uniform_crossover(parent1, parent2)
             
-            self.mutate(child1)
-            self.mutate(child2)
+            self.smart_mutate(child1)
+            self.smart_mutate(child2)
             
             next_generation.extend([child1, child2])
         
-        # Przycinamy do odpowiedniego rozmiaru i przypisujemy ID
+        # Przytnij do odpowiedniego rozmiaru
         next_generation = next_generation[:self.population_size]
         for i, individual in enumerate(next_generation):
             individual.id = i
         
         self.population = next_generation
     
-    def save_progress(self):
-        """Zapisuje postęp do pliku JSON"""
-        progress_data = {
-            "nr_generacji": self.generation,
-            "n_populacji": self.population_size,
-            "osobnicy": []
-        }
-        
-        for individual in self.population:
-            individual_data = {
-                "id": individual.id,
-                "genotyp": [round(gene, 6) for gene in individual.genotype],
-                "fitness": round(individual.fitness, 2)
-            }
-            progress_data["osobnicy"].append(individual_data)
-        
-        with open(self.progress_file, 'w', encoding='utf-8') as f:
-            json.dump(progress_data, f, indent=2, ensure_ascii=False)
-        
-        print(f"Postęp zapisany do pliku: {self.progress_file}")
-    
     def print_generation_stats(self):
-        """Wyświetla statystyki generacji"""
+        """Wyświetla szczegółowe statystyki generacji"""
         fitnesses = [ind.fitness for ind in self.population]
+        success_rates = [ind.success_rate for ind in self.population if hasattr(ind, 'success_rate')]
+        
         best_fitness = max(fitnesses)
         avg_fitness = np.mean(fitnesses)
         worst_fitness = min(fitnesses)
         
-        best_individual = max(self.population, key=lambda x: x.fitness)
-        
-        print(f"\n=== Generacja {self.generation} ===")
+        print(f"\n{'='*60}")
+        print(f"GENERACJA {self.generation}")
+        print(f"{'='*60}")
         print(f"Najlepszy fitness: {best_fitness:.2f}")
         print(f"Średni fitness: {avg_fitness:.2f}")
         print(f"Najgorszy fitness: {worst_fitness:.2f}")
-        print(f"Najlepszy genotyp: {[round(g, 4) for g in best_individual.genotype]}")
-        print(f"Parametry najlepszego: LR={best_individual.genotype[0]:.4f}, "
-              f"γ={best_individual.genotype[1]:.4f}, "
-              f"ε_start={best_individual.genotype[2]:.4f}, "
-              f"ε_end={best_individual.genotype[3]:.4f}, "
-              f"ε_decay={best_individual.genotype[4]:.6f}")
+        
+        if success_rates:
+            avg_success = np.mean(success_rates)
+            best_success = max(success_rates)
+            successful_individuals = sum(1 for sr in success_rates if sr > 0)
+            
+            print(f"Najlepszy sukces: {best_success:.1%}")
+            print(f"Średni sukces: {avg_success:.1%}")
+            print(f"Osobników z sukcesem: {successful_individuals}/{len(success_rates)}")
+        
+        # Rozkład fitness
+        excellent = sum(1 for f in fitnesses if f > 50)
+        good = sum(1 for f in fitnesses if f > 0)
+        poor = sum(1 for f in fitnesses if f <= 0)
+        
+        print(f"Rozkład fitness:")
+        print(f"  Doskonały (>50): {excellent}")
+        print(f"  Dobry (>0): {good}")
+        print(f"  Słaby (<=0): {poor}")
     
     def run(self):
         """Uruchamia algorytm genetyczny"""
-        print("Inicjalizacja algorytmu genetycznego dla Taxi-v3")
-        print(f"Parametry: populacja={self.population_size}, generacje={self.num_generations}")
-        print(f"Ziarno RNG: {self.seed}")
+        print("="*70)
+        print("ULEPSONY ALGORYTM GENETYCZNY DLA TAXI-V3")
+        print("="*70)
+        print(f"Parametry:")
+        print(f"- Wielkość populacji: {self.population_size}")
+        print(f"- Liczba generacji: {self.num_generations}")
+        print(f"- Stopa mutacji: {self.mutation_rate}")
+        print(f"- Stopa krzyżowania: {self.crossover_rate}")
+        print(f"- Rozmiar elity: {self.elite_size}")
         
-        # Inicjalizacja populacji
         self.initialize_population()
         
         for generation in range(self.num_generations):
             self.generation = generation
             
-            # Ocena populacji
             self.evaluate_population()
-            
-            # Wyświetlenie statystyk
             self.print_generation_stats()
+
+            self.save_generation_to_file()
             
-            # Zapis postępu
-            self.save_progress()
-            
-            # Tworzenie następnej generacji (oprócz ostatniej)
+            # Wczesne zatrzymanie jeśli osiągnięto doskonałe wyniki
+            if self.population[0].success_rate >= 0.9 and self.population[0].fitness > 100:
+                print(f"\nOsiągnięto doskonałe wyniki! Zatrzymuję wcześniej.")
+                break
+                
             if generation < self.num_generations - 1:
                 self.create_next_generation()
         
-        print(f"\nAlgorytm zakończony!")
-        print(f"Najlepszy wynik: {max(ind.fitness for ind in self.population):.2f}")
+        print(f"\n{'='*70}")
+        print(f"ALGORYTM ZAKOŃCZONY!")
+        print(f"{'='*70}")
         
-        # Zwracamy najlepszego osobnika
         best_individual = max(self.population, key=lambda x: x.fitness)
+        print(f"Najlepszy fitness: {best_individual.fitness:.2f}")
+        print(f"Najlepszy sukces: {best_individual.success_rate:.1%}")
+        print(f"Średnie kroki: {best_individual.avg_steps:.1f}")
+        
         return best_individual
 
-def main():
-    """Funkcja główna"""
-    # Tworzenie i uruchomienie algorytmu genetycznego
-    ga = TaxiGeneticAlgorithm(
-        population_size=20,
-        num_generations=10,
-        mutation_rate=0.1,
-        crossover_rate=0.8,
-        elite_size=3,
-        seed=71
-    )
+    def save_generation_to_file(self, filename: str = "genetic_progress.json"):
+        """Zapisuje dane generacji do pliku JSON"""
+        data = {
+            "nr_generacji": int(self.generation),  # Konwersja na int
+            "n_populacji": int(len(self.population)),  # Konwersja na int
+            "osobnicy": [
+                {
+                    "id": int(individual.id),  # Konwersja na int
+                    "genotyp": [int(g) for g in individual.genotype],  # Konwersja każdego elementu genotypu na int
+                    "fitness": float(individual.fitness)  # Konwersja na float
+                }
+                for individual in self.population
+            ]
+        }
+        
+        # Zapisz dane do pliku z niestandardowymi separatorami
+        with open(filename, "w") as file:
+            json.dump(data, file, indent=4, separators=(",", ": "))
+
+def demonstrate_best_model(best_individual, num_episodes: int = 3):
+    """Demonstracja najlepszego modelu"""
+    print(f"\n{'='*60}")
+    print(f"DEMONSTRACJA NAJLEPSZEGO MODELU")
+    print(f"{'='*60}")
     
-    best_individual = ga.run()
-    
-    print(f"\nNajlepszy znaleziony osobnik:")
-    print(f"Genotyp: {[round(g, 4) for g in best_individual.genotype]}")
-    print(f"Fitness: {best_individual.fitness:.2f}")
-    
-    # Demonstracja działania najlepszego modelu
-    print(f"\nDemonstracja najlepszego modelu...")
     env = gym.make('Taxi-v3', render_mode='human')
+    action_names = ["Południe↓", "Północ↑", "Wschód→", "Zachód←", "Podnieś", "Zostaw"]
     
-    for episode in range(3):
+    total_rewards = []
+    total_steps = []
+    successful_episodes = 0
+    
+    for episode in range(num_episodes):
         state, _ = env.reset()
         episode_reward = 0
         done = False
         step = 0
         
-        print(f"\nEpizod {episode + 1}:")
+        print(f"\n--- EPIZOD {episode + 1} ---")
+        env.render()
+        time.sleep(1)  # Dodane opóźnienie
         
         while not done and step < 200:
-            action = np.argmax(best_individual.q_table[state])
-            state, reward, terminated, truncated, _ = env.step(action)
+            action = best_individual.genotype[state]
+            next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
             episode_reward += reward
             step += 1
+            
+            env.render()  # Renderuj po każdym kroku
+            time.sleep(0.5)  # Opóźnienie między krokami
+            
+            if reward == 20:
+                print(f"  ✓ SUKCES w kroku {step}! (+20)")
+                time.sleep(2)  # Dłuższa pauza przy sukcesie
+                break
+            elif reward == -10:
+                print(f"  ✗ Błąd w kroku {step}: {action_names[action]} (-10)")
+            
+            state = next_state
         
-        print(f"Nagroda: {episode_reward}, Kroki: {step}")
+        total_rewards.append(episode_reward)
+        total_steps.append(step)
+        
+        if episode_reward > 0:
+            successful_episodes += 1
+            status = "SUKCES ✓"
+        else:
+            status = "PORAŻKA ✗"
+        
+        print(f"Wynik: {status}, Nagroda: {episode_reward}, Kroki: {step}")
+        time.sleep(1)  # Pauza między epizodami
     
     env.close()
+    
+    print(f"\n{'='*60}")
+    print(f"PODSUMOWANIE")
+    print(f"{'='*60}")
+    print(f"Udane epizody: {successful_episodes}/{num_episodes}")
+    print(f"Średnia nagroda: {np.mean(total_rewards):.2f}")
+    print(f"Średnie kroki: {np.mean(total_steps):.1f}")
+
+
+def main():
+    """Funkcja główna"""
+    ga = TaxiGeneticAlgorithm(
+        population_size=80,      # Zwiększona populacja
+        num_generations=200,      # Więcej generacji
+        mutation_rate=0.12,      # Wyższa stopa mutacji
+        crossover_rate=0.85,     # Wyższa stopa krzyżowania
+        elite_size=10,            # Więcej elit
+        seed=42
+    )
+    
+    best_individual = ga.run()
+    
+    print(f"\n{'='*70}")
+    print(f"NAJLEPSZY OSOBNIK")
+    print(f"{'='*70}")
+    print(f"Fitness: {best_individual.fitness:.2f}")
+    print(f"Sukces: {best_individual.success_rate:.1%}")
+    print(f"Średnie kroki: {best_individual.avg_steps:.1f}")
+    
+    demonstrate_best_model(best_individual, num_episodes=20)
 
 if __name__ == "__main__":
     main()
