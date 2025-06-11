@@ -6,6 +6,8 @@ import time
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from datetime import datetime
+import matplotlib.pyplot as plt
+
 
 @dataclass
 class Individual:
@@ -254,7 +256,7 @@ class TaxiGeneticAlgorithm:
             state, _ = self.env.reset()
             episode_reward = 0
             done = False
-            max_steps = 200
+            max_steps = 20
             step = 0
             episode_pickups = 0
             episode_dropoffs = 0
@@ -312,34 +314,23 @@ class TaxiGeneticAlgorithm:
         fitness += success_rate * 300
         
         # Bonus za prawidłowe akcje
-        fitness += pickup_rate * 50
-        fitness += dropoff_rate * 100
+        fitness += pickup_rate * 200
+        fitness += dropoff_rate * 300
         
         # Kara za nielegalne akcje
-        fitness -= illegal_rate * 100
+        fitness -= illegal_rate * 200
         
         # Bonus za efektywność (mniej kroków gdy sukces)
         if success_rate > 0:
             efficiency_bonus = max(0, (150 - avg_steps) * 0.2)
             fitness += efficiency_bonus
-        
-        # Dodatkowy bonus za wysoką skuteczność
-        if success_rate >= 0.8:
-            fitness += 150
-        elif success_rate >= 0.5:
-            fitness += 75
-        elif success_rate >= 0.2:
-            fitness += 30
-        
+               
         return max(fitness, avg_reward)  # Fitness nie może być gorszy niż średnia nagroda
     
     def evaluate_population(self):
         """Ocenia całą populację"""
-        print(f"\nOcenianie populacji generacji {self.generation}...")
         for i, individual in enumerate(self.population):
             individual.fitness = self.evaluate_individual(individual)
-            if (i + 1) % 20 == 0:
-                print(f"Oceniono {i + 1}/{len(self.population)} osobników")
         
         # Sortuj populację według fitness
         self.population.sort(key=lambda x: x.fitness, reverse=True)
@@ -353,7 +344,7 @@ class TaxiGeneticAlgorithm:
         print(f"Najlepszy fitness: {best_fitness:.2f}")
         print(f"Średni fitness: {avg_fitness:.2f}")
     
-    def tournament_selection(self, tournament_size: int = 7) -> Individual:
+    def tournament_selection(self, tournament_size: int = 10) -> Individual:
         """Selekcja turniejowa"""
         tournament_size = min(tournament_size, len(self.population))
         tournament_indices = self.rng.choice(len(self.population), tournament_size, replace=False)
@@ -504,6 +495,19 @@ class TaxiGeneticAlgorithm:
         print(f"  Dobry (>0): {good}")
         print(f"  Słaby (<=0): {poor}")
     
+    def plot_fitness_progress(self):
+        """Rysuje wykres postępu uczenia"""
+        plt.figure(figsize=(10, 5))
+        plt.plot(self.best_fitness_history, label='Najlepszy fitness', color='green', linewidth=2)
+        plt.plot(self.avg_fitness_history, label='Średni fitness', color='blue', linestyle='--')
+        plt.title('Postęp uczenia - fitness w czasie')
+        plt.xlabel('Generacja')
+        plt.ylabel('Fitness')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.show()
+    
     def run(self):
         """Uruchamia algorytm genetyczny"""
         print("="*70)
@@ -526,11 +530,6 @@ class TaxiGeneticAlgorithm:
 
             self.save_generation_to_file()
             
-            # Wczesne zatrzymanie jeśli osiągnięto doskonałe wyniki
-            if self.population[0].success_rate >= 0.9 and self.population[0].fitness > 100:
-                print(f"\nOsiągnięto doskonałe wyniki! Zatrzymuję wcześniej.")
-                break
-                
             if generation < self.num_generations - 1:
                 self.create_next_generation()
         
@@ -542,6 +541,8 @@ class TaxiGeneticAlgorithm:
         print(f"Najlepszy fitness: {best_individual.fitness:.2f}")
         print(f"Najlepszy sukces: {best_individual.success_rate:.1%}")
         print(f"Średnie kroki: {best_individual.avg_steps:.1f}")
+
+        self.plot_fitness_progress()
         
         return best_individual
 
@@ -585,9 +586,8 @@ def demonstrate_best_model(best_individual, num_episodes: int = 3):
         
         print(f"\n--- EPIZOD {episode + 1} ---")
         env.render()
-        time.sleep(1)  # Dodane opóźnienie
         
-        while not done and step < 200:
+        while not done and step < 20:
             action = best_individual.genotype[state]
             next_state, reward, terminated, truncated, _ = env.step(action)
             done = terminated or truncated
@@ -595,7 +595,6 @@ def demonstrate_best_model(best_individual, num_episodes: int = 3):
             step += 1
             
             env.render()  # Renderuj po każdym kroku
-            time.sleep(0.5)  # Opóźnienie między krokami
             
             if reward == 20:
                 print(f"  ✓ SUKCES w kroku {step}! (+20)")
@@ -632,10 +631,10 @@ def main():
     """Funkcja główna"""
     ga = TaxiGeneticAlgorithm(
         population_size=80,      # Zwiększona populacja
-        num_generations=200,      # Więcej generacji
-        mutation_rate=0.12,      # Wyższa stopa mutacji
+        num_generations=600,      # Więcej generacji
+        mutation_rate=0.06,      # Wyższa stopa mutacji
         crossover_rate=0.85,     # Wyższa stopa krzyżowania
-        elite_size=10,            # Więcej elit
+        elite_size=8,            # Więcej elit
         seed=42
     )
     
