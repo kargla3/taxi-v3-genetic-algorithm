@@ -311,14 +311,14 @@ class TaxiGeneticAlgorithm:
         fitness = avg_reward  # Bazowa nagroda
         
         # Duży bonus za sukces
-        fitness += success_rate * 300
+        fitness += success_rate * 500
         
         # Bonus za prawidłowe akcje
         fitness += pickup_rate * 200
         fitness += dropoff_rate * 300
         
         # Kara za nielegalne akcje
-        fitness -= illegal_rate * 200
+        fitness -= illegal_rate * 100
         
         # Bonus za efektywność (mniej kroków gdy sukces)
         if success_rate > 0:
@@ -344,7 +344,7 @@ class TaxiGeneticAlgorithm:
         print(f"Najlepszy fitness: {best_fitness:.2f}")
         print(f"Średni fitness: {avg_fitness:.2f}")
     
-    def tournament_selection(self, tournament_size: int = 10) -> Individual:
+    def tournament_selection(self, tournament_size: int = 20) -> Individual:
         """Selekcja turniejowa"""
         tournament_size = min(tournament_size, len(self.population))
         tournament_indices = self.rng.choice(len(self.population), tournament_size, replace=False)
@@ -377,7 +377,7 @@ class TaxiGeneticAlgorithm:
     def smart_mutate(self, individual: Individual):
         """Inteligentna mutacja z kontekstem"""
         # Adaptacyjna stopa mutacji - maleje z czasem
-        adaptive_rate = self.mutation_rate * (1.0 - 0.5 * self.generation / self.num_generations)
+        adaptive_rate = self.mutation_rate * (1.0 - self.generation / self.num_generations)
         
         for state in range(len(individual.genotype)):
             if self.rng.random() < adaptive_rate:
@@ -631,10 +631,10 @@ def main():
     """Funkcja główna"""
     ga = TaxiGeneticAlgorithm(
         population_size=80,      # Zwiększona populacja
-        num_generations=600,      # Więcej generacji
+        num_generations=1000,      # Więcej generacji
         mutation_rate=0.06,      # Wyższa stopa mutacji
         crossover_rate=0.85,     # Wyższa stopa krzyżowania
-        elite_size=8,            # Więcej elit
+        elite_size=15,            # Więcej elit
         seed=42
     )
     
