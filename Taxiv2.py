@@ -38,8 +38,8 @@ class TaxiGeneticAlgorithm:
         
         # Parametry środowiska
         self.env = gym.make('Taxi-v3')
-        self.state_space = self.env.observation_space.n  # 500 stanów
-        self.action_space = self.env.action_space.n      # 6 akcji
+        self.state_space = self.env.observation_space.n
+        self.action_space = self.env.action_space.n
         
         # Rozmiar genotypu = liczba stanów
         self.genotype_size = self.state_space
@@ -109,10 +109,6 @@ class TaxiGeneticAlgorithm:
                 valid_moves[(row, col)] = moves
         
         return valid_moves
-    
-    def manhattan_distance(self, pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
-        """Oblicza odległość Manhattan między dwoma pozycjami"""
-        return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
     
     def get_best_move(self, taxi_pos: Tuple[int, int], target_pos: Tuple[int, int]) -> int:
         """Zwraca najlepszy dostępny ruch w kierunku celu"""
@@ -546,24 +542,27 @@ class TaxiGeneticAlgorithm:
         
         return best_individual
 
-    def save_generation_to_file(self, filename: str = "genetic_progress.json"):
-        """Zapisuje dane generacji do pliku JSON"""
+    def save_generation_to_file(self):
+        """Zapisuje dane generacji do osobnego pliku JSON z genotypem zakodowanym literami, pomijając akcje 4 i 5"""
+        symbol_map = {0: 'd', 1: 'g', 2: 'p', 3: 'l'}  # dol, gora, prawo, lewo
+
         data = {
-            "nr_generacji": int(self.generation),  # Konwersja na int
-            "n_populacji": int(len(self.population)),  # Konwersja na int
+            "nr_generacji": int(self.generation),
+            "n_populacji": int(len(self.population)),
             "osobnicy": [
                 {
-                    "id": int(individual.id),  # Konwersja na int
-                    "genotyp": [int(g) for g in individual.genotype],  # Konwersja każdego elementu genotypu na int
-                    "fitness": float(individual.fitness)  # Konwersja na float
+                    "id": int(ind.id),
+                    "genotyp": ", ".join(symbol_map[g] for g in ind.genotype if g in symbol_map),
+                    "fitness": float(ind.fitness)
                 }
-                for individual in self.population
+                for ind in self.population
             ]
         }
-        
-        # Zapisz dane do pliku z niestandardowymi separatorami
-        with open(filename, "w") as file:
-            json.dump(data, file, indent=4, separators=(",", ": "))
+
+        filename = f"populations/population_gen_{self.generation:03d}.json"
+        with open(filename, "w") as f:
+            json.dump(data, f, indent=2, separators=(",", ": "))
+
 
 def demonstrate_best_model(best_individual, num_episodes: int = 3):
     """Demonstracja najlepszego modelu"""
