@@ -283,6 +283,92 @@ class FitnessPlotter:
         if show_plot:
             plt.show()
 
+    def extract_success_data(
+        self, populations: List[Dict]
+    ) -> Tuple[List[int], List[float]]:
+        """
+        Ekstraktuje średnie wskaźniki sukcesu z populacji
+
+        Returns:
+            generations: Lista numerów generacji
+            avg_success_rates: Lista średnich wskaźników sukcesu dla każdej generacji
+        """
+        generations = []
+        avg_success_rates = []
+
+        for pop_data in populations:
+            gen_num = pop_data.get("nr_generacji", 0)
+            osobnicy = pop_data.get("osobnicy", [])
+
+            if not osobnicy:
+                continue
+
+            # Upewnij się, że 'success_rate' jest dostępny w danych
+            success_values = [
+                ind.get("success_rate", 0.0)
+                for ind in osobnicy
+                if "success_rate" in ind
+            ]
+
+            if success_values:
+                generations.append(gen_num)
+                avg_success_rates.append(np.mean(success_values))
+        return generations, avg_success_rates
+
+    def plot_success_progress(
+        self,
+        save_path: str = None,
+        show_plot: bool = True,
+        figsize: Tuple[int, int] = (12, 8),
+    ) -> None:
+        """
+        Generuje wykres postępu średniego wskaźnika sukcesu
+
+        Args:
+            save_path: Ścieżka do zapisania wykresu (opcjonalnie)
+            show_plot: Czy pokazać wykres
+            figsize: Rozmiar wykresu (szerokość, wysokość)
+        """
+        populations = self.load_population_data()
+        if not populations:
+            return
+
+        generations, avg_success_rates = self.extract_success_data(populations)
+
+        if not generations:
+            print("Brak danych do wykresu średniego wskaźnika sukcesu!")
+            return
+
+        plt.figure(figsize=figsize)
+        plt.plot(
+            generations,
+            avg_success_rates,
+            "c-",
+            linewidth=2.5,
+            label="Średni wskaźnik sukcesu",
+            marker="o",
+            markersize=4,
+        )
+
+        plt.title(
+            "Postęp uczenia - Średni wskaźnik sukcesu w czasie",
+            fontsize=16,
+            fontweight="bold",
+        )
+        plt.xlabel("Generacja", fontsize=12)
+        plt.ylabel("Wskaźnik sukcesu", fontsize=12)
+        plt.legend(fontsize=11)
+        plt.grid(True, alpha=0.3)
+        plt.ylim(0, 1.05)  # Wskaźnik sukcesu jest w zakresie [0, 1]
+        plt.tight_layout()
+
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches="tight")
+            print(f"Wykres zapisany jako: {save_path}")
+
+        if show_plot:
+            plt.show()
+
     def get_training_summary(self) -> Dict:
         """
         Zwraca podsumowanie treningu
@@ -391,8 +477,9 @@ def main():
         print("1. Wygeneruj wykres postępu fitness")
         print("2. Wygeneruj histogram rozkładu fitness")
         print("3. Pokaż podsumowanie treningu")
-        print("4. Tryb monitorowania w czasie rzeczywistym")
-        print("5. Wyjście")
+        print("4. Tryb monitorowania w czasie rzeczywistym (eksperymentalny)")
+        print("5. Wygeneruj wykres średniego wskaźnika sukcesu")  # Nowa opcja
+        print("6. Wyjście")  # Zmieniony numer
 
         choice = input("\nWybór (1-5): ").strip()
 
@@ -441,9 +528,23 @@ def main():
             interval = int(interval) if interval.isdigit() else 10
 
             auto_save = input("Automatycznie zapisywać wykresy? (t/n): ").lower() == "t"
+            # W trybie monitorowania, wykresy są generowane, ale nie pokazywane interaktywnie
+            # Zapisanie ich jest kluczowe, aby mieć podgląd postępu
+            if not auto_save:
+                print(
+                    "Ostrzeżenie: W trybie monitorowania bez automatycznego zapisu, wykresy nie będą widoczne."
+                )
+                print("Zaleca się włączenie automatycznego zapisu.")
+
             plotter.monitor_training(refresh_interval=interval, auto_save=auto_save)
 
         elif choice == "5":
+            print("\nGenerowanie wykresu średniego wskaźnika sukcesu...")
+            save = input("Zapisać wykres? (t/n): ").lower() == "t"
+            save_path = "success_progress.png" if save else None
+            plotter.plot_success_progress(save_path=save_path)
+
+        elif choice == "6":  # Zmieniony numer
             print("Do widzenia!")
             break
 
