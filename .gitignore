@@ -1,0 +1,9 @@
+# Pliki generowane przez algorytm genetyczny
+# Ignoruje cały katalog z danymi populacji (pliki .json)
+populations/
+
+# Wykresy i inne pliki generowane przez plotter.py
+*.png
+
+# Pamięć podręczna Pythona
+__pycache__/
